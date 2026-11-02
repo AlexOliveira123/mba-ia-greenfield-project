@@ -13,6 +13,10 @@ docker compose ps   # all services must show status "running"
 Then verify each infrastructure service is actually ready to accept connections — not just running:
 
 - **PostgreSQL:** `docker compose exec db pg_isready -U streamtube` — expect `accepting connections`
+- **Redis:** `docker compose exec redis redis-cli ping` — expect `PONG`
+- **MinIO:** `curl -sf http://localhost:9000/minio/health/live` — expect HTTP 200
+
+**Before running `npm run test:e2e`**, ensure the `video-worker` is connected to BullMQ. The `pretest:e2e` npm hook (runs `scripts/check-worker.mjs`) polls for 15 s; if no worker is found it exits with an error. Fix: `docker compose restart video-worker` on the host, then re-run.
 
 Only start the NestJS dev server (`npm run start:dev`) when the user **explicitly** asks to run the application — never as part of "start the environment".
 
@@ -21,7 +25,10 @@ Only start the NestJS dev server (`npm run start:dev`) when the user **explicitl
 This project runs inside Docker. Always use the container for development:
 
 ```bash
-# Start containers
+# Fresh clone only — create .env from the example (never committed; required for Compose + dotenv)
+cp .env.example .env
+
+# Start containers (nestjs-api, db, mailpit, redis, minio, video-worker all start together)
 docker compose up -d
 
 # Install dependencies (first time only)
@@ -34,6 +41,10 @@ docker compose exec nestjs-api npm run start:dev
 Services:
 - `nestjs-api` — NestJS API, port `3000`
 - `db` — PostgreSQL 17, port `5432`, database `streamtube`, user/password `streamtube`
+- `mailpit` — email capture, SMTP port `1025`, web UI port `8025`
+- `redis` — Redis 7, port `6379` — BullMQ message broker
+- `minio` — Chainguard MinIO (S3-compatible), API port `9000`, console port `9001`; data in named Docker volume `minio-data`
+- `video-worker` — builds and runs `src/worker/worker-main.ts` (compiled to `dist-worker/`); shares the same `Dockerfile.dev` as `nestjs-api`
 
 All verification and teardown commands run on the **host machine**:
 
@@ -78,8 +89,12 @@ npm run format                           # Prettier formatting
 ```bash
 docker compose ps
 docker compose logs nestjs-api
+docker compose logs video-worker
 docker compose exec db pg_isready -U streamtube
+docker compose exec redis redis-cli ping
+curl -sf http://localhost:9000/minio/health/live
 curl http://localhost:3000
+docker compose restart video-worker   # required before test:e2e if worker lost connection
 ```
 
 ### Test execution
@@ -148,6 +163,56 @@ NestJS with standard module structure. Source lives in `src/`, compiled output i
 
 - Each domain feature gets its own module (e.g., `UsersModule`, `VideosModule`) registered in `AppModule`
 - Controllers handle HTTP routing; Services hold business logic; both are scoped to their module
+
+## Videos, Storage & Queue (Phase 03)
+
+### Modules
+
+| Module | Path | Responsibility |
+|---|---|---|
+| `StorageModule` | `src/storage/` | `StorageService` wraps `@aws-sdk/client-s3` for MinIO multipart upload, presigned part URLs, presigned GET URLs. Calls `ensureBucket()` on `onModuleInit`. |
+| `QueueModule` | `src/queue/` | Registers the BullMQ queue `video-processing` via `@nestjs/bullmq`. Queue name constant: `VIDEO_PROCESSING_QUEUE = 'video-processing'`. |
+| `VideosModule` | `src/videos/` | `VideosController` + `VideosService` — upload initiation, upload completion, stream/download URL generation. |
+| `VideoWorkerModule` | `src/worker/` | `VideoWorkerProcessor` — BullMQ consumer. Entry point: `src/worker/worker-main.ts`, compiled to `dist-worker/worker/worker-main.js` (isolated output — never conflicts with `nestjs-api`'s `dist/`). |
+
+### Video endpoints
+
+| Method & Route | Auth | Description |
+|---|---|---|
+| `POST /videos/upload/initiate` | JWT required | Creates a draft `Video` row + S3 multipart upload; returns `videoId`, `publicId`, `uploadId`, `parts[]` (presigned PUT URLs). |
+| `POST /videos/upload/complete` | JWT required (owner only) | Completes the S3 multipart upload; enqueues a `video-processing` job; transitions row to `processing`. |
+| `GET /videos/:publicId/stream-url` | Public (video must be `ready`) | Returns a time-limited presigned GET URL for progressive streaming — the URL supports HTTP Range requests (206 Partial Content); no HLS/DASH transcoding in Phase 03. |
+| `GET /videos/:publicId/download-url` | Public (video must be `ready`) | Returns a time-limited presigned GET URL with `Content-Disposition: attachment`. |
+
+### Video status lifecycle
+
+```
+draft → processing → ready
+                   ↘ failed
+```
+
+The `video-worker` transitions `processing → ready` on success, or `processing → failed` (with `failure_reason`) after all retry attempts are exhausted.
+
+### Queue job
+
+- **Queue name:** `video-processing`
+- **Job payload:** `{ videoId: string, storageKey: string }`
+- **Job options:** `{ attempts, backoff: { type: 'exponential', delay: backoffMs }, jobId: videoId }` — values from `queueConfig` (namespaced config `src/config/queue.config.ts`).
+
+### Queue retry env vars
+
+```dotenv
+VIDEO_JOB_ATTEMPTS=3       # Joi default: 3
+VIDEO_JOB_BACKOFF_MS=200   # Joi default: 5000; set to 200 in .env for fast local tests
+                            # (exponential backoff: 200ms, 400ms, … — corrupt-file test finishes in seconds)
+```
+
+### MINIO_PUBLIC_ENDPOINT
+
+The `StorageService` uses two S3 clients:
+
+- **Internal client** (`MINIO_ENDPOINT`, e.g., `http://minio:9000`) — for `createMultipartUpload`, `completeMultipartUpload`, `HeadObject`, etc.
+- **Public client** (`MINIO_PUBLIC_ENDPOINT`, default: falls back to `MINIO_ENDPOINT` when unset) — for `getSignedUrl` calls that produce URLs consumed by browsers. Set to `http://localhost:9000` in `.env.example` so presigned URLs are reachable from the host.
 
 ## Code Conventions
 
