@@ -1,6 +1,6 @@
 services:
   nestjs-api:
-    build: 
+    build:
       context: .
       dockerfile: Dockerfile.dev
     ports:
@@ -11,6 +11,10 @@ services:
       db:
         condition: service_healthy
       mailpit:
+        condition: service_started
+      redis:
+        condition: service_healthy
+      minio:
         condition: service_started
 
   db:
@@ -33,4 +37,47 @@ services:
       - "1025:1025"
       - "8025:8025"
 
+  minio:
+    image: cgr.dev/chainguard/minio@sha256:0a01100085e30fb08d2f39e39c9f5c9d83a95707f220b007d813b690cd41622d
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio-data:/data
+    environment:
+      MINIO_ROOT_USER: streamtube
+      MINIO_ROOT_PASSWORD: streamtube123
+      MINIO_API_CORS_ALLOW_ORIGIN: "*"
 
+  video-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    restart: unless-stopped
+    command:
+      - sh
+      - -c
+      - "npx tsc -p tsconfig.build.json --outDir dist-worker --declaration false --sourceMap false && node dist-worker/worker/worker-main.js"
+    volumes:
+      - .:/home/node/app
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_started
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  minio-data:

@@ -45,9 +45,9 @@ O projeto é um monorepo baseado em containers Docker. Cada subprojeto sobe sua 
 - **API** (NestJS 11) — regras de negócio, autenticação (JWT + refresh token rotation), envio de e-mails e acesso ao banco.
 - **Database** (PostgreSQL 17) — usuários, canais e tokens de autenticação.
 - **Email Service** (Mailpit) — captura os e-mails transacionais (confirmação de conta e recuperação de senha) em uma UI local.
-- **Video Worker** (FFmpeg) — processamento de vídeos *(planejado — Fase 03)*.
-- **Object Storage** (S3/MinIO) — arquivos de vídeo e thumbnails *(planejado — Fase 03)*.
-- **Message Queue** — fila de processamento de vídeos *(planejado — Fase 03)*.
+- **Video Worker** (FFmpeg) — processa vídeos consumindo jobs da fila, extrai metadados, gera thumbnails.
+- **Object Storage** (MinIO/S3) — armazena arquivos de vídeo e thumbnails; uploads via S3 multipart com presigned URLs.
+- **Message Queue** (BullMQ + Redis) — fila `video-processing`; jobs publicados pela API e consumidos pelo video-worker.
 
 O diagrama de arquitetura completo (C4) está em `docs/diagrams/software-arch.mermaid`.
 
@@ -60,7 +60,10 @@ Os dois subprojetos têm stacks Docker **separadas**. Suba primeiro o backend, r
 ```bash
 cd nestjs-project
 
-# Sobe API, banco e Mailpit
+# Clone inicial: cria o .env a partir do exemplo (.env é gitignored mas obrigatório)
+cp .env.example .env
+
+# Sobe todos os serviços (API, PostgreSQL, Mailpit, Redis, MinIO, video-worker)
 docker compose up -d
 
 # Instala dependências (apenas na primeira vez)
@@ -80,6 +83,9 @@ Serviços disponíveis:
 | API NestJS | http://localhost:3000 |
 | PostgreSQL | `localhost:5432` (db/user/senha: `streamtube`) |
 | Mailpit (UI de e-mails) | http://localhost:8025 |
+| Redis | `localhost:6379` |
+| MinIO (API S3) | http://localhost:9000 |
+| MinIO (console) | http://localhost:9001 (user/senha: `streamtube` / `streamtube123`) |
 | Swagger (opcional) | http://localhost:3000/api/docs — habilite com `SWAGGER_ENABLED=true` |
 
 ### 2. Frontend (Next.js)
@@ -112,6 +118,8 @@ docker compose exec nestjs-api npm run test:cov       # cobertura
 
 Sufixos: `*.spec.ts` (unitário), `*.integration-spec.ts` (integração com banco real), `*.e2e-spec.ts` (end-to-end). Testes de integração/e2e rodam com `--runInBand`.
 
+> **Antes de `test:e2e`:** garanta que o `video-worker` está conectado ao BullMQ. O script `pretest:e2e` verifica automaticamente (15 s de polling); se falhar, execute `docker compose restart video-worker` no host e tente novamente.
+
 ### Frontend (Vitest + Playwright)
 
 ```bash
@@ -124,7 +132,7 @@ Sufixos: `*.test.ts(x)` (unitário), `*.integration.test.ts(x)` (Route Handlers 
 
 ## ✅ Funcionalidades implementadas
 
-**Fase 01 — Configuração base** e **Fase 02 — Autenticação** estão concluídas (backend + frontend).
+**Fases 01, 02 e 03** estão concluídas (backend).
 
 ### Autenticação (Fase 02)
 
@@ -151,6 +159,21 @@ Telas e Route Handlers BFF (`next-frontend`):
 
 Segurança: senhas com **Argon2**, **JWT** com `JwtAuthGuard` global (opt-out via `@Public()`), **rotação de refresh token** com detecção de reuso, **rate limiting** (`ThrottlerGuard`) nos endpoints de auth, e sessão no navegador via **iron-session** (cookies HTTP-only).
 
+### Upload e Processamento de Vídeos (Fase 03)
+
+Upload multipart de até 10 GB via presigned URLs direto ao MinIO (bytes não passam pelo NestJS). Processamento assíncrono por `video-worker` (FFmpeg): extração de metadados, geração de thumbnail. Entrega via presigned URLs com TTL.
+
+Endpoints da API (`nestjs-project`):
+
+| Método & Rota | Auth | Descrição |
+|---------------|------|-----------|
+| `POST /videos/upload/initiate` | JWT | Cria rascunho (`draft`) + multipart upload no MinIO; retorna `videoId`, `publicId`, `uploadId`, `parts[]` |
+| `POST /videos/upload/complete` | JWT (dono) | Finaliza o multipart upload; enfileira job `video-processing`; status → `processing` |
+| `GET /videos/:publicId/stream-url` | Público | Retorna presigned URL para streaming (suporta Range requests); vídeo deve estar `ready` |
+| `GET /videos/:publicId/download-url` | Público | Retorna presigned URL com `Content-Disposition: attachment`; vídeo deve estar `ready` |
+
+Ciclo de status: `draft → processing → ready | failed`.
+
 ## 🛠️ Estrutura do Projeto
 
 ```
@@ -160,7 +183,8 @@ green-field-ia-project/
 │   ├── phases/                          # Planos e implementação por fase
 │   │   ├── phase-01-configuracao-base/
 │   │   ├── phase-02-auth/               # Auth (backend)
-│   │   └── phase-02-auth-frontend/      # Auth (frontend)
+│   │   ├── phase-02-auth-frontend/      # Auth (frontend)
+│   │   └── phase-03-videos/             # Upload, processamento e entrega de vídeos
 │   └── diagrams/
 │       └── software-arch.mermaid        # Diagrama de arquitetura (C4)
 ├── nestjs-project/                      # Backend API (NestJS 11)
@@ -168,12 +192,17 @@ green-field-ia-project/
 │   │   ├── auth/                        # Cadastro, login, JWT, refresh, reset de senha
 │   │   ├── users/                       # Entidade e serviço de usuários
 │   │   ├── channels/                    # Canal 1:1 por usuário (nickname do e-mail)
+│   │   ├── videos/                      # Upload, entrega (stream/download), Video entity
+│   │   ├── storage/                     # StorageService (S3/MinIO multipart + presigned URLs)
+│   │   ├── queue/                       # QueueModule (BullMQ — fila video-processing)
+│   │   ├── worker/                      # VideoWorkerProcessor (FFmpeg) + worker-main.ts
 │   │   ├── mail/                        # Envio de e-mails (templates Handlebars)
 │   │   ├── common/                      # Filtros, pipes e exceptions de domínio
 │   │   ├── config/                      # Configs namespaced (Joi)
 │   │   └── database/                    # data-source, migrations e seeds
 │   ├── test/                            # Testes e2e
-│   ├── compose.yaml                     # Docker Compose (API + PostgreSQL + Mailpit)
+│   ├── scripts/                         # check-worker.mjs (validação do video-worker antes do e2e)
+│   ├── compose.yaml                     # Docker Compose (API + PostgreSQL + Mailpit + Redis + MinIO + video-worker)
 │   └── Dockerfile.dev
 ├── next-frontend/                       # Frontend (Next.js 16, App Router)
 │   ├── app/                             # Rotas, layouts, páginas e Route Handlers BFF
@@ -195,7 +224,7 @@ green-field-ia-project/
 |------|-----------|--------|
 | **01** | Configuração Base do Projeto | ✅ Concluída |
 | **02** | Cadastro, Login e Gerenciamento de Conta | ✅ Concluída |
-| **03** | Upload e Processamento de Vídeos | ⏳ Planejada |
+| **03** | Upload e Processamento de Vídeos | ✅ Concluída |
 | **04** | Gerenciamento de Vídeos e Canal | ⏳ Planejada |
 | **05** | Página de Visualização do Vídeo | ⏳ Planejada |
 | **06** | Interações Sociais (Likes, Comentários, Inscrições) | ⏳ Planejada |
@@ -208,8 +237,10 @@ Detalhes completos em `docs/project-plan.md`.
 | Camada | Tecnologia |
 |--------|------------|
 | Frontend | Next.js 16, React 19, TypeScript, Tailwind CSS 4, shadcn/ui, React Hook Form + Zod, iron-session, openapi-fetch |
-| Backend | NestJS 11, TypeScript, TypeORM, JWT, Argon2, Mailer (Handlebars) |
+| Backend | NestJS 11, TypeScript, TypeORM, JWT, Argon2, Mailer (Handlebars), BullMQ, FFmpeg |
 | Banco de Dados | PostgreSQL 17 |
+| Object Storage | MinIO (Chainguard), compatível com AWS S3 (`@aws-sdk/client-s3`) |
+| Fila de mensagens | Redis 7 + BullMQ |
 | E-mail (dev) | Mailpit |
 | Containerização | Docker, Docker Compose |
 | Testes | Jest, Supertest (backend); Vitest, MSW, Playwright (frontend) |

@@ -6,6 +6,8 @@ const requiredEnv = {
   DB_NAME: 'db',
   JWT_SECRET: 'secret',
   JWT_REFRESH_SECRET: 'refresh-secret',
+  MINIO_ACCESS_KEY: 'minioadmin',
+  MINIO_SECRET_KEY: 'minioadmin',
 };
 
 const validate = (env: Record<string, string>) =>
@@ -32,8 +34,10 @@ describe('envValidationSchema — SWAGGER_ENABLED', () => {
   });
 
   it('should apply default false when SWAGGER_ENABLED is not set', () => {
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
     const { value, error } = validate({});
     expect(error).toBeUndefined();
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
     expect(value.SWAGGER_ENABLED).toBe('false');
   });
 });
