@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-unsafe-return */
 import { BadRequestException, ArgumentsHost } from '@nestjs/common';
 import { ValidationExceptionFilter } from './validation-exception.filter';
 
