@@ -48,3 +48,37 @@ export class TokenReuseDetectedException extends DomainException {
     );
   }
 }
+
+export class VideoNotFoundException extends DomainException {
+  constructor() {
+    super('VIDEO_NOT_FOUND', 404, 'Video not found');
+  }
+}
+
+export class UploadOwnershipException extends DomainException {
+  constructor() {
+    super('UPLOAD_OWNERSHIP', 403, 'You do not own this channel');
+  }
+}
+
+export class UploadInitiateFailedException extends DomainException {
+  constructor() {
+    super('UPLOAD_INITIATE_FAILED', 500, 'Failed to initiate multipart upload');
+  }
+}
+
+export class UploadCompleteFailedException extends DomainException {
+  constructor() {
+    super('UPLOAD_COMPLETE_FAILED', 500, 'Failed to complete multipart upload');
+  }
+}
+
+export class UploadPartCountMismatchException extends DomainException {
+  constructor() {
+    super(
+      'UPLOAD_PART_COUNT_MISMATCH',
+      422,
+      'Parts count does not match recorded partCount',
+    );
+  }
+}

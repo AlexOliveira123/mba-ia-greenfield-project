@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/unbound-method */
 import * as argon2 from 'argon2';
 import * as crypto from 'crypto';
 import { getRepositoryToken } from '@nestjs/typeorm';
